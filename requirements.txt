@@ -1,0 +1,14 @@
+# Core dependencies - install with: pip install -r requirements.txt
+streamlit>=1.30.0
+splink>=4.0.0
+pandas>=1.5.0
+numpy>=1.24.0
+duckdb>=0.10.0
+plotly>=5.0.0
+fpdf2>=2.7.0
+matplotlib>=3.5.0
+
+# Optional – improves data quality of the generated dummy dataset
+# Uncomment and run: pip install gender-guesser pgeocode
+gender-guesser>=0.4.0   # Name-based gender inference (fallback: random assignment)
+pgeocode>=0.4.0          # City-to-real-UK-postcode lookup (fallback: synthetic postcodes)
