@@ -449,6 +449,173 @@ def render_waterfall_section(coverage_matrix: pd.DataFrame, toggles: dict,
         )
 
 
+def generate_run_summary(run_label: str, results: dict, metrics: dict,
+                          cm: dict = None, crl: dict = None) -> str:
+    """Plain-language, Markdown-formatted summary of one linkage run's
+    configuration AND results, written to be pasted directly into an LLM
+    chat so the person can ask for help improving their next configuration.
+
+    Built entirely from the run's own data structures (run_config, the
+    metrics dict from compute_intra_metrics, the confusion matrix, CRL) —
+    nothing here is hardcoded to a specific dataset or field set, so it
+    stays correct regardless of which flow or dataset produced the run.
+    """
+    rc = results.get("run_config", {})
+    lines = [f"## {run_label} — Cohort Builder Linkage Summary\n"]
+
+    # ── Configuration ────────────────────────────────────────────────────
+    lines.append("### Configuration")
+    op_mode = rc.get("operation_mode", "unknown")
+    lines.append(
+        f"- Operation mode: **{op_mode}** "
+        f"({'deduplication of a single dataset' if op_mode == 'dedupe' else 'linkage between Dataset A and Dataset B'})"
+    )
+    lines.append(f"- Linkage method: **{rc.get('linkage_type', 'unknown')}**")
+    blocking_mode = rc.get("blocking_mode", "OR")
+    lines.append(
+        f"- Blocking mode: **{blocking_mode}** "
+        f"({'any active rule matches' if blocking_mode == 'OR' else 'all active fields must agree simultaneously'})"
+    )
+    lines.append(f"- Cluster probability threshold: {rc.get('cluster_threshold', 'n/a')}")
+
+    selected_fields = rc.get("selected_fields", [])
+    lines.append(f"- Comparison fields ({len(selected_fields)}): {', '.join(selected_fields) or 'none'}")
+
+    toggles = rc.get("blocking_toggles", {})
+    active_rules = sorted(k for k, v in toggles.items() if v)
+    inactive_rules = sorted(k for k, v in toggles.items() if not v)
+    lines.append(f"- Active blocking rules ({len(active_rules)}): {', '.join(active_rules) or 'none'}")
+    if inactive_rules:
+        lines.append(f"- Disabled blocking rules: {', '.join(inactive_rules)}")
+
+    hp = rc.get("hyperparams", {})
+    if hp and rc.get("linkage_type") == "probabilistic":
+        lines.append(
+            f"- Training hyperparameters: max_iterations={hp.get('max_iterations')}, "
+            f"em_convergence={hp.get('em_convergence')}, recall_estimate={hp.get('recall_estimate')}"
+        )
+
+    # ── Results ──────────────────────────────────────────────────────────
+    lines.append("\n### Results")
+    lines.append(f"- Input records: {results.get('n_input_records', 0):,}")
+    lines.append(f"- Candidate edges (predicted matches): {metrics.get('n_edges', 0):,}")
+    lines.append(f"- Distinct entity clusters: {metrics.get('n_clusters', 0):,}")
+    lines.append(f"- Records with at least one match: {metrics.get('n_unique_ids', 0):,}")
+    lines.append(f"- Linkage rate: {metrics.get('linkage_rate', 0)}%")
+
+    mp_stats = metrics.get("match_prob_stats")
+    if mp_stats is not None and not mp_stats.empty:
+        lines.append(f"- Mean match probability: {mp_stats.iloc[0].get('mean_match_prob', 'n/a')}")
+
+    if results.get("zero_edge_diagnostic"):
+        lines.append(
+            "\n**⚠ This run produced ZERO edges.** Per-field diagnostic "
+            "(fields where every value is unique can never match):"
+        )
+        for d in results["zero_edge_diagnostic"]:
+            if d.get("issue"):
+                lines.append(
+                    f"  - `{d['field']}`: {d.get('distinct_values', '?')} distinct values, "
+                    f"{d.get('values_shared_by_2plus_rows', 0)} shared by 2+ records — {d['issue']}"
+                )
+
+    # ── Ground-truth accuracy, if available ─────────────────────────────
+    if cm and not cm.get("unavailable"):
+        lines.append("\n### Accuracy against ground truth")
+        lines.append(f"- Precision: {cm.get('precision')}")
+        lines.append(f"- Recall: {cm.get('recall')}")
+        lines.append(f"- F1: {cm.get('f1')}")
+        lines.append(f"- False Discovery Rate: {cm.get('fdr')}")
+        lines.append(f"- False Negative Rate: {cm.get('fnr')}")
+        if crl and crl.get("crl_score") is not None:
+            lines.append(f"- CRL score: {crl['crl_score']:.4f} (composite reliability of linkage)")
+    elif cm and cm.get("unavailable"):
+        lines.append(f"\n### Accuracy against ground truth\nNot available: {cm.get('unavailable_reason', '')}")
+
+    # ── Demographics — fully dynamic, whatever fields this dataset has ──
+    demo_lines = []
+    for label, dist in (("Gender", metrics.get("gender_dist")), ("City", metrics.get("city_dist"))):
+        if dist is not None and not dist.empty:
+            sorted_dist = dist.sort_values(dist.columns[-1], ascending=False).head(3)
+            parts = [f"{row[0]}: {row[-1]}" for row in sorted_dist.itertuples(index=False)]
+            demo_lines.append(f"- {label}: {', '.join(parts)}")
+
+    for field, info in (metrics.get("nc_demographics") or {}).items():
+        df = info.get("df")
+        if df is not None and not df.empty:
+            parts = [f"{r.label}: {r.n_records} ({r.pct}%)" for r in df.head(3).itertuples()]
+            demo_lines.append(f"- {info.get('label', field)}: {', '.join(parts)}")
+
+    if demo_lines:
+        lines.append("\n### Cohort demographic composition (top values per field)")
+        lines.extend(demo_lines)
+
+    return "\n".join(lines)
+
+
+def generate_comparison_summary(
+    results1: dict, metrics1: dict, cm1: dict, crl1: dict,
+    results2: dict, metrics2: dict, cm2: dict, crl2: dict,
+) -> str:
+    """Run 1 vs. Run 2 summary for an LLM chat: what changed in
+    configuration, what changed in results, followed by the full detail of
+    both runs (via generate_run_summary) — so it covers both "explain the
+    differences" and "just summarize my results" in one output.
+    """
+    rc1 = results1.get("run_config", {})
+    rc2 = results2.get("run_config", {})
+    lines = ["# Cohort Builder — Run 1 vs. Run 2 Summary\n", "## What changed in configuration"]
+
+    fields1, fields2 = set(rc1.get("selected_fields", [])), set(rc2.get("selected_fields", []))
+    if fields2 - fields1:
+        lines.append(f"- Fields added in Run 2: {', '.join(sorted(fields2 - fields1))}")
+    if fields1 - fields2:
+        lines.append(f"- Fields removed in Run 2: {', '.join(sorted(fields1 - fields2))}")
+    if fields1 == fields2:
+        lines.append("- Comparison fields: unchanged")
+
+    tog1 = {k for k, v in rc1.get("blocking_toggles", {}).items() if v}
+    tog2 = {k for k, v in rc2.get("blocking_toggles", {}).items() if v}
+    if tog2 - tog1:
+        lines.append(f"- Blocking rules newly enabled in Run 2: {', '.join(sorted(tog2 - tog1))}")
+    if tog1 - tog2:
+        lines.append(f"- Blocking rules disabled in Run 2: {', '.join(sorted(tog1 - tog2))}")
+
+    for key, label in [("blocking_mode", "Blocking mode"), ("linkage_type", "Linkage method"),
+                        ("cluster_threshold", "Cluster threshold")]:
+        if rc1.get(key) != rc2.get(key):
+            lines.append(f"- {label} changed: {rc1.get(key)} → {rc2.get(key)}")
+
+    lines.append("\n## What changed in results")
+    e1, e2 = metrics1.get("n_edges", 0), metrics2.get("n_edges", 0)
+    c1, c2 = metrics1.get("n_clusters", 0), metrics2.get("n_clusters", 0)
+    lines.append(f"- Edges: {e1:,} → {e2:,} ({e2 - e1:+,})")
+    lines.append(f"- Clusters: {c1:,} → {c2:,} ({c2 - c1:+,})")
+
+    if cm1 and cm2 and not cm1.get("unavailable") and not cm2.get("unavailable"):
+        for key, label in [("precision", "Precision"), ("recall", "Recall"), ("f1", "F1")]:
+            v1, v2 = cm1.get(key), cm2.get(key)
+            if v1 is not None and v2 is not None:
+                lines.append(f"- {label}: {v1:.4f} → {v2:.4f} ({v2 - v1:+.4f})")
+
+    lines.append(
+        "\n## What I'd like help with\n"
+        "Please compare these two Cohort Builder linkage runs, explain what likely "
+        "drove the differences in results given the configuration changes, and "
+        "recommend which configuration I should prefer — or how to combine the "
+        "strengths of both — for a future run. Flag anything that looks like a "
+        "meaningful trade-off (e.g. more edges but lower precision, or a demographic "
+        "group that improved in one run and got worse in the other)."
+    )
+
+    lines.append("\n---\n")
+    lines.append(generate_run_summary("Run 1 (detail)", results1, metrics1, cm1, crl1))
+    lines.append("\n---\n")
+    lines.append(generate_run_summary("Run 2 (detail)", results2, metrics2, cm2, crl2))
+
+    return "\n".join(lines)
+
+
 def demographic_comparison_fields(baseline_fields: list, current_fields: list) -> tuple:
     """Intersect the known demographic registry against fields actually
     selected as comparisons in BOTH runs — a fair match-quality baseline
