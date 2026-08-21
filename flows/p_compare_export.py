@@ -17,7 +17,7 @@ from utils.helpers import (
     _metric_cards, _plotly_bar, _run_analysis_and_store, render_demographic_breakdowns,
     render_demographic_comparison, compute_demographic_snapshot, cohort_from_edges,
     render_match_quality_section, split_linked_unlinked,
-    render_blocking_waterfall, render_waterfall_section,
+    render_blocking_waterfall, render_waterfall_section, generate_comparison_summary,
 )
 from utils.nav import _back_button, _go_to
 import plotly.graph_objects as gobj
@@ -869,6 +869,35 @@ def page_comparison():
                                                mime="application/pdf")
                         except Exception as e:
                             st.error(f"PDF failed: {e}")
+
+                st.divider()
+                st.subheader("Generate summary for an AI assistant")
+                st.write(
+                    "Creates a plain-text summary comparing Run 1 and Run 2 — "
+                    "configuration differences, result differences, and full detail "
+                    "for both — written to be pasted into an LLM chat so you can ask "
+                    "for help understanding the differences or choosing a configuration."
+                )
+                if st.button("Generate LLM summary (Run 1 vs Run 2)", key="run2_llm_summary_btn"):
+                    try:
+                        st.session_state["run2_llm_summary"] = generate_comparison_summary(
+                            run1, m1, st.session_state.get("run1_cm"), st.session_state.get("run1_crl"),
+                            run2, m2, st.session_state.get("run2_cm"), st.session_state.get("run2_crl"),
+                        )
+                    except Exception as e:
+                        st.error(f"Could not generate summary: {e}")
+
+                if st.session_state.get("run2_llm_summary"):
+                    st.text_area(
+                        "Copy this into your LLM chat:",
+                        st.session_state["run2_llm_summary"], height=320, key="run2_llm_summary_display",
+                    )
+                    st.download_button(
+                        "Download summary (.md)",
+                        data=st.session_state["run2_llm_summary"].encode("utf-8"),
+                        file_name=f"run1_vs_run2_summary_{datetime.now().strftime('%Y%m%d_%H%M%S')}.md",
+                        mime="text/markdown",
+                    )
 
     st.divider()
     if st.button("Continue to export", type="primary"):

@@ -22,7 +22,7 @@ from utils.helpers import (
     _metric_cards, _plotly_bar, _run_analysis_and_store, render_demographic_breakdowns,
     render_demographic_comparison, compute_demographic_snapshot, cohort_from_edges,
     render_match_quality_section, split_linked_unlinked,
-    render_blocking_waterfall, render_waterfall_section,
+    render_blocking_waterfall, render_waterfall_section, generate_run_summary,
 )
 from utils.nav import _back_button, _go_to
 
@@ -831,6 +831,35 @@ def page_analysis():
                 )
             except Exception as e:
                 st.error(f"PDF generation failed: {e}")
+
+    st.divider()
+    st.subheader("Generate summary for an AI assistant")
+    st.write(
+        "Creates a plain-text summary of this run's configuration and results, "
+        "written to be pasted into an LLM chat so you can ask for help improving "
+        "your configuration before Run 2."
+    )
+    if st.button("Generate LLM summary", key="run1_llm_summary_btn"):
+        try:
+            st.session_state["run1_llm_summary"] = generate_run_summary(
+                "Run 1", results, metrics,
+                cm=st.session_state.get("run1_cm"),
+                crl=st.session_state.get("run1_crl"),
+            )
+        except Exception as e:
+            st.error(f"Could not generate summary: {e}")
+
+    if st.session_state.get("run1_llm_summary"):
+        st.text_area(
+            "Copy this into your LLM chat:",
+            st.session_state["run1_llm_summary"], height=320, key="run1_llm_summary_display",
+        )
+        st.download_button(
+            "Download summary (.md)",
+            data=st.session_state["run1_llm_summary"].encode("utf-8"),
+            file_name=f"run1_summary_{datetime.now().strftime('%Y%m%d_%H%M%S')}.md",
+            mime="text/markdown",
+        )
 
     st.divider()
     if st.button("Continue to compare runs", type="primary"):

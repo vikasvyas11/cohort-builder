@@ -114,13 +114,36 @@ def page_configure() -> None:
         if cb4.button("Add", key="cb_add") and f2:
             rule_key = f"{f1}+{f2}" + (f"+{f3}" if f3 else "")
             st.session_state["composite_rules"][rule_key] = True
+            # A composite rule only means anything if the fields inside it
+            # aren't ALSO active as independent single-field rules — in OR
+            # mode, a loose single-field rule matches a strict superset of
+            # what the composite AND would ever match, silently making the
+            # composite contribute nothing. Switch those individual toggles
+            # off here so the AND condition actually takes effect.
+            for f in rule_key.split("+"):
+                st.session_state[f"block_{f}"] = False
+            st.rerun()
+
+        _composite_fields = set()
         for key in list(st.session_state.get("composite_rules", {}).keys()):
             parts = key.split("+")
+            _composite_fields.update(parts)
             sql_parts = " AND ".join(f'l."{p}" = r."{p}"' for p in parts)
             cr1, cr2 = st.columns([4, 1])
             cr1.code(sql_parts)
             if cr2.button("Remove", key=f"rm_{key}"):
                 del st.session_state["composite_rules"][key]
+
+        _redundant = sorted(f for f in _composite_fields if blocking_toggles.get(f))
+        if _redundant:
+            st.warning(
+                f"⚠️ {', '.join(_redundant)} still has its individual blocking rule "
+                "enabled above, in addition to being part of a composite rule. "
+                "In OR mode, that individual rule alone matches everything the "
+                "composite AND rule would — cancelling out the composite's "
+                "stricter matching. Turn off the individual toggle(s) for these "
+                "fields (above) if you want the composite AND to actually apply."
+            )
 
     with st.expander("Training hyperparameters (probabilistic mode only)", expanded=False):
         hp = st.session_state.get("hyperparams", {})
